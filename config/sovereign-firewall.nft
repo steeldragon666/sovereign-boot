@@ -1,0 +1,66 @@
+#!/usr/sbin/nft -f
+# Sovereign Security — nftables firewall
+# All outbound traffic must go through Tor. No exceptions.
+
+flush ruleset
+
+table inet sovereign {
+
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # Allow loopback (localhost dashboard, Docker inter-container)
+        iif "lo" accept
+
+        # Allow established/related connections
+        ct state established,related accept
+
+        # Allow Docker bridge traffic (containers talking to each other)
+        iifname "docker0" accept
+        iifname "br-*" accept
+
+        # Drop everything else inbound
+        log prefix "SOVEREIGN_INPUT_DROP: " drop
+    }
+
+    chain output {
+        type filter hook output priority 0; policy drop;
+
+        # Allow loopback
+        oif "lo" accept
+
+        # Allow established/related
+        ct state established,related accept
+
+        # Allow Docker bridge traffic
+        oifname "docker0" accept
+        oifname "br-*" accept
+
+        # Allow Tor process outbound to OR ports and directory authorities
+        # Tor uses: 443 (OR port), 9001 (OR port), 9030 (dir port)
+        meta skuid "debian-tor" tcp dport { 80, 443, 9001, 9030, 9090, 9091 } accept
+
+        # Allow Tor DNS for bootstrapping (resolves directory authorities)
+        meta skuid "debian-tor" udp dport 53 accept
+
+        # Drop everything else outbound
+        log prefix "SOVEREIGN_OUTPUT_DROP: " drop
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        # Allow Docker container-to-container (same bridge network)
+        iifname "br-*" oifname "br-*" accept
+
+        # Allow containers to reach Tor proxy (which then goes outbound)
+        # The Tor container's outbound is handled by the output chain above
+        iifname "br-*" oif "lo" accept
+
+        # Allow established/related forwarded traffic
+        ct state established,related accept
+
+        # Drop direct internet access from containers (must go through Tor SOCKS)
+        log prefix "SOVEREIGN_FORWARD_DROP: " drop
+    }
+}

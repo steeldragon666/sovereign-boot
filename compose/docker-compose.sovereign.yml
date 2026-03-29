@@ -1,0 +1,119 @@
+# docker-compose.sovereign.yml
+# Sovereign Boot overlay — redirects all state to Apricorn USB 3
+# Usage: docker compose -f /path/to/threadcount/docker-compose.yml -f /path/to/docker-compose.sovereign.yml up -d
+
+services:
+  # ── Tor SOCKS Proxy (new service) ──────────────────────────
+  tor-proxy:
+    image: osminogin/tor-simple:latest
+    container_name: sovereign-tor
+    restart: unless-stopped
+    networks:
+      - sovereign-net
+    volumes:
+      - /mnt/sovereign/data/tor:/var/lib/tor
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+
+  # ── PostgreSQL — redirect data to USB 3 ────────────────────
+  postgres:
+    volumes:
+      - /mnt/sovereign/data/postgres/data:/var/lib/postgresql/data
+      - /mnt/sovereign/data/postgres/ssl/ca.crt:/etc/ssl/certs/ca.crt:ro
+      - /mnt/sovereign/data/logs/postgres:/var/log/postgresql
+    env_file:
+      - /mnt/sovereign/data/env/.env
+
+  # ── Redis — data on USB 3, socket on tmpfs ─────────────────
+  redis:
+    volumes:
+      - /mnt/sovereign/data/redis/data:/data
+      - type: tmpfs
+        target: /var/run/redis
+        tmpfs:
+          size: 10M
+
+  # ── FastAPI Backend — route through Tor ────────────────────
+  api:
+    env_file:
+      - /mnt/sovereign/data/env/.env
+    environment:
+      HTTP_PROXY: socks5h://tor-proxy:9050
+      HTTPS_PROXY: socks5h://tor-proxy:9050
+      NO_PROXY: postgres,redis,localhost,127.0.0.1
+    volumes:
+      - /mnt/sovereign/data/backups:/backups
+      - /mnt/sovereign/data/postgres/ssl/ca.crt:/etc/ssl/certs/ca.crt:ro
+    depends_on:
+      tor-proxy:
+        condition: service_started
+
+  # ── Telegram Bot — route through Tor ───────────────────────
+  bot:
+    env_file:
+      - /mnt/sovereign/data/env/.env
+    environment:
+      HTTP_PROXY: socks5h://tor-proxy:9050
+      HTTPS_PROXY: socks5h://tor-proxy:9050
+      NO_PROXY: api,postgres,redis,localhost,127.0.0.1
+    depends_on:
+      tor-proxy:
+        condition: service_started
+
+  # ── Caddy — redirect state to USB 3 ───────────────────────
+  caddy:
+    volumes:
+      - /mnt/sovereign/data/caddy/data:/data
+      - /mnt/sovereign/data/caddy/config:/config
+
+  # ── Dashboard — no changes needed ─────────────────────────
+  dashboard: {}
+
+# Override named volumes — we don't use them, but must declare
+# them to prevent docker compose from creating default ones
+volumes:
+  pgdata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/sovereign/data/postgres/data
+  redis-socket:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=10m
+  redis-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/sovereign/data/redis/data
+  backups:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/sovereign/data/backups
+  caddy-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/sovereign/data/caddy/data
+  caddy-config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/sovereign/data/caddy/config
+  postgres-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/sovereign/data/logs/postgres

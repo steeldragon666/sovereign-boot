@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Sovereign Security Boot
+Exec=xfce4-terminal --title="Sovereign Boot" --maximize -e /home/sovereign/.local/bin/sovereign-boot.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-XFCE-Autostart-Override=true
+Comment=Mounts encrypted drives and launches ThreadCount through Tor
+Icon=security-high
+StartupNotify=true

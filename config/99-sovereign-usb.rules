@@ -1,0 +1,19 @@
+# Sovereign Security — USB Device Whitelist
+# Only known USB drives are permitted. All others are blocked and logged.
+# Install to: /etc/udev/rules.d/99-sovereign-usb.rules
+# Discover serials: udevadm info --query=all --name=/dev/sdX | grep ID_SERIAL_SHORT
+
+# --- Block all unknown USB mass storage by default ---
+ACTION=="add", SUBSYSTEMS=="usb", DRIVERS=="usb-storage", \
+    ENV{ID_SERIAL_SHORT}!="PROGRAM_DRIVE_SERIAL", \
+    ENV{ID_SERIAL_SHORT}!="DATA_DRIVE_SERIAL", \
+    ATTR{authorized}="0", \
+    RUN+="/bin/sh -c 'echo \"[$(date +%%Y-%%m-%%dT%%H:%%M:%%S)] UNAUTHORIZED USB: vendor=%s{idVendor} product=%s{idProduct} serial=%E{ID_SERIAL_SHORT}\" >> /tmp/sovereign-usb-audit.log'"
+
+# --- Whitelist USB 2 (Program drive) ---
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_SERIAL_SHORT}=="PROGRAM_DRIVE_SERIAL", \
+    ATTR{authorized}="1"
+
+# --- Whitelist USB 3 (Apricorn data drive) ---
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_SERIAL_SHORT}=="DATA_DRIVE_SERIAL", \
+    ATTR{authorized}="1"

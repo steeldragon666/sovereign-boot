@@ -115,12 +115,8 @@ if [[ -z "$(docker images -q threadcount-api 2>/dev/null)" ]]; then
     cd "$TC_DIR" && docker compose build
 fi
 
-# Use sovereign overlay if it exists
+# Use base compose only (sovereign overlay disabled until fully configured)
 COMPOSE_CMD="docker compose -f $TC_DIR/docker-compose.yml"
-SV_COMPOSE="$REAL_HOME/.config/sovereign/compose/docker-compose.sovereign.yml"
-if [[ -f "$SV_COMPOSE" ]]; then
-    COMPOSE_CMD="$COMPOSE_CMD -f $SV_COMPOSE"
-fi
 
 cd "$TC_DIR"
 $COMPOSE_CMD --project-name sovereign up -d

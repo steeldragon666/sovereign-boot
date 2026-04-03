@@ -106,16 +106,30 @@ echo "  ✓ .env valid"
 echo "[5] Starting Docker..."
 systemctl is-active --quiet docker || { systemctl start docker; sleep 3; }
 
-# 6. Build
-echo "[6] Building images..."
+# 6. Build with sovereign mode
+echo "[6] Building images (with sovereign mode)..."
 cd "$TC"
-docker compose build 2>&1 | tail -5
+OVERLAY="$REAL_HOME/.config/sovereign/compose/docker-compose.sovereign.yml"
+# Install overlay if not present
+mkdir -p "$REAL_HOME/.config/sovereign/compose"
+if [[ -d "$REAL_HOME/sovereign-boot/compose" ]]; then
+    cp "$REAL_HOME/sovereign-boot/compose/"* "$REAL_HOME/.config/sovereign/compose/"
+    chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config/sovereign"
+fi
 
-# 7. Launch — foreground first to see errors
-echo "[7] Launching (showing output for 30 seconds)..."
+COMPOSE_FILES="-f $TC/docker-compose.yml"
+if [[ -f "$OVERLAY" ]]; then
+    COMPOSE_FILES="$COMPOSE_FILES -f $OVERLAY"
+    echo "  Using sovereign overlay (Tor + auth bypass)"
+fi
+
+docker compose $COMPOSE_FILES build 2>&1 | tail -5
+
+# 7. Launch
+echo "[7] Launching..."
 echo ""
 cd "$TC"
-docker compose --project-name sovereign up -d 2>&1
+docker compose $COMPOSE_FILES --project-name sovereign up -d 2>&1
 
 echo ""
 echo "  Waiting 30 seconds for services to start..."

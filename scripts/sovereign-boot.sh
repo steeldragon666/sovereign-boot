@@ -39,11 +39,12 @@ for dev in /dev/sd?1 /dev/sd?; do
     [[ "$FSTYPE" == "LVM2_member" ]] && continue
     SIZE=$(lsblk -bno SIZE "$dev" 2>/dev/null | head -1)
     SIZE_GB=$((SIZE / 1073741824))
-    # Skip tiny partitions and the NVMe
     [[ $SIZE_GB -lt 5 ]] && continue
-    TRAN=$(lsblk -no TRAN "$dev" 2>/dev/null | head -1)
-    [[ "$TRAN" != "usb" ]] && continue
-    echo "  Found USB device: $dev (${SIZE_GB}GB, $FSTYPE)"
+    # Skip NVMe and loop devices — everything else is a USB drive
+    PARENT=$(lsblk -no PKNAME "$dev" 2>/dev/null | head -1)
+    [[ "$PARENT" == nvme* ]] && continue
+    [[ "$dev" == /dev/loop* ]] && continue
+    echo "  Found device: $dev (${SIZE_GB}GB, $FSTYPE)"
     DATA_DEVICE="$dev"
     break
 done

@@ -10,11 +10,12 @@ echo ""
 echo "=== DIAGNOSING AND FIXING ==="
 echo ""
 
-# 1. Stop everything
-echo "[1] Cleaning up..."
-docker compose --project-name sovereign down --timeout 5 2>/dev/null || true
+# 1. Stop everything and wipe volumes for clean start
+echo "[1] Cleaning up (removing all containers and volumes)..."
+cd "$TC" 2>/dev/null && docker compose --project-name sovereign down -v --timeout 5 2>/dev/null || true
+docker compose down -v --timeout 5 2>/dev/null || true
 docker rm -f $(docker ps -aq) 2>/dev/null || true
-docker volume prune -f 2>/dev/null || true
+docker volume rm $(docker volume ls -q) 2>/dev/null || true
 
 # 2. Update threadcount
 echo "[2] Updating ThreadCount..."

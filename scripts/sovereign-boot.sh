@@ -76,13 +76,14 @@ umount "$DATA_DEVICE" 2>/dev/null || true
 AUTOMOUNT=$(lsblk -no MOUNTPOINT "$DATA_DEVICE" 2>/dev/null | head -1)
 [[ -n "$AUTOMOUNT" ]] && umount "$AUTOMOUNT" 2>/dev/null || true
 mkdir -p "$DATA_MOUNT"
-mount -o rw,nosuid,nodev "$DATA_DEVICE" "$DATA_MOUNT" || fail "Could not mount $DATA_DEVICE"
+REAL_UID=$(id -u "$REAL_USER")
+REAL_GID=$(id -g "$REAL_USER")
+mount -o "rw,nosuid,nodev,uid=$REAL_UID,gid=$REAL_GID,dmask=0000,fmask=0000" "$DATA_DEVICE" "$DATA_MOUNT" || fail "Could not mount $DATA_DEVICE"
 
 # Ensure Apricorn directory structure
 for dir in env jwt postgres/data postgres/ssl redis/data caddy/data caddy/config tor logs/postgres backups; do
     mkdir -p "$DATA_MOUNT/$dir"
 done
-chown -R "$REAL_USER:$REAL_USER" "$DATA_MOUNT"
 ok "Apricorn mounted at $DATA_MOUNT ($(lsblk -bno SIZE "$DATA_DEVICE" | awk '{printf "%.0fGB", $1/1073741824}'))"
 
 # ============================================================

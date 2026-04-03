@@ -1,7 +1,12 @@
-# Sovereign overlay — redirect persistent state to Apricorn
-# Merges with base docker-compose.yml
-# Volume lists APPEND in compose overrides, so base config file
-# mounts (init.sql, redis.conf, Caddyfile) are preserved automatically.
+# Sovereign overlay
+#
+# Adds:
+#   - Tor SOCKS5 proxy for outbound api/bot traffic
+#   - env_file from Apricorn mount for postgres/api/bot
+#
+# Does NOT redirect Docker volumes — they stay on the laptop's
+# LUKS-encrypted SSD (fast, supports POSIX permissions).
+# The Apricorn holds secrets only (.env, JWT keys).
 
 services:
   tor-proxy:
@@ -16,15 +21,7 @@ services:
           memory: 128M
           cpus: "0.25"
 
-  postgres:
-    env_file:
-      - /mnt/sovereign/data/env/.env
-
-  redis: {}
-
   api:
-    env_file:
-      - /mnt/sovereign/data/env/.env
     environment:
       HTTPS_PROXY: socks5h://tor-proxy:9050
       HTTP_PROXY: socks5h://tor-proxy:9050
@@ -34,8 +31,6 @@ services:
         condition: service_started
 
   bot:
-    env_file:
-      - /mnt/sovereign/data/env/.env
     environment:
       HTTPS_PROXY: socks5h://tor-proxy:9050
       HTTP_PROXY: socks5h://tor-proxy:9050
@@ -43,46 +38,3 @@ services:
     depends_on:
       tor-proxy:
         condition: service_started
-
-  dashboard: {}
-
-  caddy: {}
-
-# Redirect named volumes to Apricorn bind mounts
-volumes:
-  pgdata:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /mnt/sovereign/data/postgres/data
-  redis-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /mnt/sovereign/data/redis/data
-  backups:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /mnt/sovereign/data/backups
-  caddy-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /mnt/sovereign/data/caddy/data
-  caddy-config:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /mnt/sovereign/data/caddy/config
-  postgres-logs:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /mnt/sovereign/data/logs/postgres

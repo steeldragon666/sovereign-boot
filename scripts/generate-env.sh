@@ -1,7 +1,10 @@
 #!/bin/bash
+# Generate all ThreadCount secrets on the Apricorn
 if [[ $EUID -ne 0 ]]; then echo "Run with sudo"; exit 1; fi
 
 DATA="/mnt/sovereign/data"
+
+# Auto-detect and mount Apricorn
 if ! mountpoint -q "$DATA" 2>/dev/null; then
     for dev in /dev/sd?1 /dev/sd?; do
         [[ -b "$dev" ]] || continue
@@ -12,26 +15,22 @@ if ! mountpoint -q "$DATA" 2>/dev/null; then
         mount "$dev" "$DATA" && break
     done
 fi
-
-if ! mountpoint -q "$DATA" 2>/dev/null; then
-    echo "ERROR: Could not mount data drive"
-    exit 1
-fi
+mountpoint -q "$DATA" || { echo "ERROR: Could not mount data drive"; exit 1; }
 
 mkdir -p "$DATA/env" "$DATA/jwt"
 
-# Generate RSA key pair for JWT as files
+# JWT RSA keys (saved as files — Docker can mount these)
 openssl genrsa -out "$DATA/jwt/private.pem" 2048 2>/dev/null
 openssl rsa -in "$DATA/jwt/private.pem" -pubout -out "$DATA/jwt/public.pem" 2>/dev/null
-chmod 600 "$DATA/jwt/private.pem"
 
-# Generate secrets
+# Random secrets
 PG_PASS=$(openssl rand -hex 32)
 FERNET=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" 2>/dev/null || openssl rand -base64 32)
-BOT_API_KEY=$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)
-HMAC_SECRET=$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)
+BOT_API_KEY=$(openssl rand -base64 32 | tr -d '/+=' | head -c 43)
+HMAC_SECRET=$(openssl rand -base64 32 | tr -d '/+=' | head -c 43)
 OPERATOR_PASS=$(openssl rand -hex 16)
 
+# Write .env — simple key=value, no special characters in values
 cat > "$DATA/env/.env" << ENVEOF
 POSTGRES_USER=sovereign
 POSTGRES_PASSWORD=$PG_PASS
@@ -64,11 +63,11 @@ DEBUG=false
 ENVEOF
 
 echo ""
-echo "=== Generated .env ==="
-echo "Operator login: admin / $OPERATOR_PASS"
-echo "JWT keys saved to: $DATA/jwt/"
+echo "=== Secrets Generated ==="
+echo "Dashboard login:  admin / $OPERATOR_PASS"
+echo "JWT keys:         $DATA/jwt/"
 echo ""
-echo "Replace TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_IDS in:"
-echo "  $DATA/env/.env"
+echo "IMPORTANT: Set your Telegram bot token and admin ID:"
+echo "  sudo nano $DATA/env/.env"
 echo ""
 echo "DONE"

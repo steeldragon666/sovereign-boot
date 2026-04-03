@@ -1,149 +1,208 @@
 #!/bin/bash
+set -uo pipefail
 
 # ============================================================
-# Sovereign Boot — Launch ThreadCount with Apricorn Data Drive
+# Sovereign Boot — Secure ThreadCount launcher
+#
+# Architecture:
+#   Laptop (LUKS Ubuntu) — Docker, code, images
+#   Apricorn (FIPS 140-2) — secrets, databases, logs
+#
+# The sovereign compose overlay redirects all Docker named
+# volumes to bind mounts on the Apricorn. Config files
+# (init.sql, redis.conf, Caddyfile) stay in the repo.
+# Tor proxy routes outbound API/bot traffic through SOCKS5.
+#
 # Run with: sudo bash sovereign-boot.sh
 # ============================================================
 
+# ---- Constants ----
+DATA_MOUNT="/mnt/sovereign/data"
+COMPOSE_PROJECT="sovereign"
+
+# ---- Root check ----
 if [[ $EUID -ne 0 ]]; then
-    echo "Run with: sudo bash $0"
+    echo "Usage: sudo bash $0"
     exit 1
 fi
 
+# ---- Resolve real user ----
 REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || whoami)}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
-DATA_MOUNT="/mnt/sovereign/data"
 TC_DIR="$REAL_HOME/threadcount"
+OVERLAY="$REAL_HOME/.config/sovereign/compose/docker-compose.sovereign.yml"
 
+# ---- Helpers ----
+fail() { echo "  ✗ $1"; exit 1; }
+ok()   { echo "  ✓ $1"; }
+
+# ---- Banner ----
 echo ""
 echo "╔═══════════════════════════════════════════════════════╗"
 echo "║            SOVEREIGN BOOT SYSTEM                     ║"
 echo "╚═══════════════════════════════════════════════════════╝"
 echo ""
 
-# ---- CLEANUP STALE STATE ----
-docker compose --project-name sovereign down --timeout 10 2>/dev/null || true
+# ---- Cleanup previous session ----
+docker compose --project-name "$COMPOSE_PROJECT" down --timeout 10 2>/dev/null || true
 umount -l "$DATA_MOUNT" 2>/dev/null || true
+rm -f "$TC_DIR/.env" 2>/dev/null || true
 
-# ---- STEP 1: FIND APRICORN ----
-echo "[1] Unlock Apricorn with hardware PIN, plug it in, press Enter..."
+# ============================================================
+# STEP 1 — Detect and mount Apricorn
+# ============================================================
+echo "[1] Waiting for Apricorn..."
+echo "    Unlock with hardware PIN → plug in → press Enter"
 read -r
 
-# Find USB drive that isn't the boot drive
 DATA_DEVICE=""
 for dev in /dev/sd?1 /dev/sd?; do
     [[ -b "$dev" ]] || continue
     FSTYPE=$(lsblk -no FSTYPE "$dev" 2>/dev/null | head -1)
-    [[ -z "$FSTYPE" ]] && continue
-    [[ "$FSTYPE" == "crypto_LUKS" ]] && continue
-    [[ "$FSTYPE" == "LVM2_member" ]] && continue
+    [[ -z "$FSTYPE" || "$FSTYPE" == "crypto_LUKS" || "$FSTYPE" == "LVM2_member" ]] && continue
     SIZE=$(lsblk -bno SIZE "$dev" 2>/dev/null | head -1)
     SIZE_GB=$((SIZE / 1073741824))
     [[ $SIZE_GB -lt 5 ]] && continue
-    # Skip NVMe and loop devices — everything else is a USB drive
     PARENT=$(lsblk -no PKNAME "$dev" 2>/dev/null | head -1)
     [[ "$PARENT" == nvme* ]] && continue
-    [[ "$dev" == /dev/loop* ]] && continue
-    echo "  Found device: $dev (${SIZE_GB}GB, $FSTYPE)"
     DATA_DEVICE="$dev"
     break
 done
 
-if [[ -z "$DATA_DEVICE" ]]; then
-    echo "  ERROR: No USB data drive found."
-    lsblk -o NAME,SIZE,TYPE,FSTYPE,TRAN
-    exit 1
-fi
+[[ -z "$DATA_DEVICE" ]] && fail "No USB data drive found. Run: lsblk"
 
-# ---- STEP 2: MOUNT APRICORN ----
-echo ""
-echo "[2] Mounting Apricorn..."
+# Unmount automount, remount at known path
 umount "$DATA_DEVICE" 2>/dev/null || true
+AUTOMOUNT=$(lsblk -no MOUNTPOINT "$DATA_DEVICE" 2>/dev/null | head -1)
+[[ -n "$AUTOMOUNT" ]] && umount "$AUTOMOUNT" 2>/dev/null || true
 mkdir -p "$DATA_MOUNT"
-if ! mount -o rw,nosuid,nodev "$DATA_DEVICE" "$DATA_MOUNT"; then
-    echo "  ERROR: Failed to mount $DATA_DEVICE"
-    exit 1
-fi
+mount -o rw,nosuid,nodev "$DATA_DEVICE" "$DATA_MOUNT" || fail "Could not mount $DATA_DEVICE"
 
-for dir in env postgres/data postgres/ssl redis/data caddy/data caddy/config tor logs backups; do
+# Ensure Apricorn directory structure
+for dir in env jwt postgres/data postgres/ssl redis/data caddy/data caddy/config tor logs/postgres backups; do
     mkdir -p "$DATA_MOUNT/$dir"
 done
 chown -R "$REAL_USER:$REAL_USER" "$DATA_MOUNT"
-echo "  ✓ Apricorn mounted at $DATA_MOUNT"
+ok "Apricorn mounted at $DATA_MOUNT ($(lsblk -bno SIZE "$DATA_DEVICE" | awk '{printf "%.0fGB", $1/1073741824}'))"
 
-# ---- STEP 3: CHECK .ENV ----
+# ============================================================
+# STEP 2 — Validate secrets
+# ============================================================
 echo ""
-echo "[3] Checking secrets..."
-if [[ ! -f "$DATA_MOUNT/env/.env" ]]; then
-    echo "  ERROR: No .env file on Apricorn at $DATA_MOUNT/env/.env"
-    echo "  Run the provisioning script first."
-    exit 1
-fi
-echo "  ✓ Secrets found"
+echo "[2] Validating secrets..."
+[[ -f "$DATA_MOUNT/env/.env" ]] || fail ".env not found — run: sudo bash scripts/generate-env.sh"
+source "$DATA_MOUNT/env/.env" 2>/dev/null
+[[ -n "${POSTGRES_PASSWORD:-}" ]] || fail ".env missing POSTGRES_PASSWORD"
+[[ "${TELEGRAM_BOT_TOKEN:-}" != "PASTE_YOUR_BOT_TOKEN_HERE" ]] || echo "    ⚠ Telegram bot token not configured — bot will fail"
+ok "Secrets validated"
 
-# ---- STEP 4: CHECK THREADCOUNT ----
+# ============================================================
+# STEP 3 — Prepare ThreadCount
+# ============================================================
 echo ""
-echo "[4] Checking ThreadCount..."
+echo "[3] Preparing ThreadCount..."
+
 if [[ ! -f "$TC_DIR/docker-compose.yml" ]]; then
-    echo "  ThreadCount not found at $TC_DIR — cloning..."
+    echo "    Cloning repository..."
     su - "$REAL_USER" -c "git clone https://github.com/steeldragon666/threadcount.git $TC_DIR"
 fi
+[[ -f "$TC_DIR/docker-compose.yml" ]] || fail "docker-compose.yml not found in $TC_DIR"
 
-if [[ ! -f "$TC_DIR/docker-compose.yml" ]]; then
-    echo "  ERROR: docker-compose.yml not found"
-    exit 1
-fi
-echo "  ✓ ThreadCount ready at $TC_DIR"
-
-# ---- STEP 5: ENSURE DOCKER IS RUNNING ----
-if ! systemctl is-active --quiet docker; then
-    systemctl start docker
-    sleep 3
-fi
-
-# ---- STEP 6: LAUNCH ----
-echo ""
-echo "[5] Launching ThreadCount..."
-echo ""
-
-# Link .env from Apricorn
+# Copy .env into project directory (docker compose reads from project root)
 cp "$DATA_MOUNT/env/.env" "$TC_DIR/.env"
+chmod 600 "$TC_DIR/.env"
+ok "ThreadCount ready"
 
-# Build if images don't exist
+# ============================================================
+# STEP 4 — Docker
+# ============================================================
+echo ""
+echo "[4] Starting Docker..."
+
+systemctl is-active --quiet docker || systemctl start docker
+sleep 2
+
+# Build app images if missing
 if [[ -z "$(docker images -q threadcount-api 2>/dev/null)" ]]; then
-    echo "  Building images (first run, takes a few minutes)..."
+    echo "    Building images (first run, takes a few minutes)..."
     cd "$TC_DIR" && docker compose build
 fi
 
-# Use base compose only (sovereign overlay disabled until fully configured)
-COMPOSE_CMD="docker compose -f $TC_DIR/docker-compose.yml"
+# Pull infrastructure images if missing
+for img in postgres:16-alpine redis:7-alpine caddy:2-alpine osminogin/tor-simple:latest; do
+    if [[ -z "$(docker images -q "$img" 2>/dev/null)" ]]; then
+        echo "    Pulling $img..."
+        docker pull "$img"
+    fi
+done
+ok "Docker images ready"
+
+# ============================================================
+# STEP 5 — Launch
+# ============================================================
+echo ""
+echo "[5] Launching ThreadCount..."
 
 cd "$TC_DIR"
-$COMPOSE_CMD --project-name sovereign up -d
+
+# Build compose command — use overlay if available
+COMPOSE_FILES="-f $TC_DIR/docker-compose.yml"
+if [[ -f "$OVERLAY" ]]; then
+    COMPOSE_FILES="$COMPOSE_FILES -f $OVERLAY"
+    echo "    Using sovereign overlay (Tor + Apricorn volumes)"
+else
+    echo "    Using base compose only"
+fi
+
+docker compose $COMPOSE_FILES --project-name "$COMPOSE_PROJECT" up -d
+
+# Wait for services
+echo "    Waiting for services to start..."
+RETRIES=30
+while [[ $RETRIES -gt 0 ]]; do
+    RUNNING=$(docker compose --project-name "$COMPOSE_PROJECT" ps --status running --format json 2>/dev/null | wc -l || echo 0)
+    [[ $RUNNING -ge 4 ]] && break
+    sleep 2
+    ((RETRIES--)) || true
+done
 
 echo ""
-docker compose --project-name sovereign ps
+docker compose --project-name "$COMPOSE_PROJECT" ps
+echo ""
+
+# Quick health summary
+HEALTHY=$(docker compose --project-name "$COMPOSE_PROJECT" ps --format json 2>/dev/null | grep -c healthy || echo 0)
+TOTAL=$(docker compose --project-name "$COMPOSE_PROJECT" ps --format json 2>/dev/null | wc -l || echo 0)
+echo "    Services: $TOTAL running, $HEALTHY healthy"
+
 echo ""
 echo "╔═══════════════════════════════════════════════════════╗"
 echo "║          SOVEREIGN SESSION ACTIVE                    ║"
-echo "║          Dashboard: http://localhost/dashboard        ║"
+echo "║                                                       ║"
+echo "║  Dashboard:  http://localhost                         ║"
+echo "║  API:        http://localhost/api/v1/health           ║"
 echo "╚═══════════════════════════════════════════════════════╝"
 echo ""
 
-# Open browser
-if command -v firefox &>/dev/null; then
-    su - "$REAL_USER" -c "firefox http://localhost/dashboard &" 2>/dev/null || true
-fi
+# Open browser as real user
+su - "$REAL_USER" -c "firefox http://localhost &" 2>/dev/null || true
 
-echo "Press Enter to shut down..."
+echo "Press Enter to shut down and safely eject Apricorn..."
 read -r
 
-# ---- SHUTDOWN ----
+# ============================================================
+# SHUTDOWN
+# ============================================================
 echo ""
 echo "Shutting down..."
+
 cd "$TC_DIR"
-$COMPOSE_CMD --project-name sovereign down --timeout 15 2>/dev/null || true
+docker compose $COMPOSE_FILES --project-name "$COMPOSE_PROJECT" down --timeout 15
+
+# Remove .env from disk (secrets stay on Apricorn only)
 rm -f "$TC_DIR/.env"
+
+# Sync and unmount
 sync
 umount "$DATA_MOUNT" 2>/dev/null || umount -l "$DATA_MOUNT" 2>/dev/null || true
 

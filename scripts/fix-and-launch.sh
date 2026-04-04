@@ -5,31 +5,61 @@ REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || whoami)}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 TC="$REAL_HOME/threadcount"
 DATA="/mnt/sovereign/data"
+OVERLAY="$REAL_HOME/.config/sovereign/compose/docker-compose.sovereign.yml"
 
 echo ""
-echo "=== DIAGNOSING AND FIXING ==="
+echo "╔═══════════════════════════════════════════════════════╗"
+echo "║         SOVEREIGN FULL RESET AND LAUNCH               ║"
+echo "╚═══════════════════════════════════════════════════════╝"
 echo ""
 
-# 1. NUCLEAR CLEANUP — remove everything Docker-related
-echo "[1] Full Docker reset..."
+# ============================================================
+# 1. DESTROY ALL DOCKER STATE
+# ============================================================
+echo "[1] Destroying all Docker state..."
 docker compose --project-name sovereign down -v --remove-orphans --timeout 5 2>/dev/null || true
-cd "$TC" 2>/dev/null && docker compose down -v --remove-orphans --timeout 5 2>/dev/null || true
 docker stop $(docker ps -aq) 2>/dev/null || true
 docker rm -f $(docker ps -aq) 2>/dev/null || true
-docker system prune --volumes -f 2>/dev/null || true
-echo "  ✓ All containers, volumes, and cache removed"
+docker volume rm $(docker volume ls -q) 2>/dev/null || true
+docker network prune -f 2>/dev/null || true
+docker system prune -a --volumes -f 2>/dev/null || true
+echo "  ✓ All Docker containers, images, volumes, cache destroyed"
 
-# 2. Update threadcount
-echo "[2] Updating ThreadCount..."
+# ============================================================
+# 2. UPDATE SOURCE CODE
+# ============================================================
+echo ""
+echo "[2] Updating source code..."
+su - "$REAL_USER" -c "cd $REAL_HOME/sovereign-boot && git pull" 2>/dev/null
 if [[ -d "$TC" ]]; then
-    cd "$TC" && su - "$REAL_USER" -c "cd $TC && git pull"
+    su - "$REAL_USER" -c "cd $TC && git pull"
 else
     su - "$REAL_USER" -c "git clone https://github.com/steeldragon666/threadcount.git $TC"
 fi
+echo "  ✓ Code updated"
 
-# 3. Mount Apricorn
-echo "[3] Mounting Apricorn..."
+# ============================================================
+# 3. INSTALL SOVEREIGN OVERLAY
+# ============================================================
+echo ""
+echo "[3] Installing sovereign overlay..."
+mkdir -p "$REAL_HOME/.config/sovereign/compose"
+cp "$REAL_HOME/sovereign-boot/compose/"* "$REAL_HOME/.config/sovereign/compose/" 2>/dev/null || true
+sed -i 's/\r$//' "$REAL_HOME/.config/sovereign/compose/"* 2>/dev/null || true
+chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config/sovereign"
+if [[ -f "$OVERLAY" ]]; then
+    echo "  ✓ Overlay installed"
+else
+    echo "  ⚠ No overlay found — will use base compose only"
+fi
+
+# ============================================================
+# 4. MOUNT APRICORN AND SETUP .ENV
+# ============================================================
+echo ""
+echo "[4] Setting up secrets..."
 umount -l "$DATA" 2>/dev/null || true
+MOUNTED=false
 for dev in /dev/sd?1 /dev/sd?; do
     [[ -b "$dev" ]] || continue
     FSTYPE=$(lsblk -no FSTYPE "$dev" 2>/dev/null | head -1)
@@ -43,18 +73,19 @@ for dev in /dev/sd?1 /dev/sd?; do
     AUTOMOUNT=$(lsblk -no MOUNTPOINT "$dev" 2>/dev/null | head -1)
     [[ -n "$AUTOMOUNT" ]] && umount "$AUTOMOUNT" 2>/dev/null || true
     mkdir -p "$DATA"
-    mount -o "rw,uid=$(id -u $REAL_USER),gid=$(id -g $REAL_USER)" "$dev" "$DATA" && echo "  Mounted $dev" && break
+    mount -o "rw,uid=$(id -u $REAL_USER),gid=$(id -g $REAL_USER)" "$dev" "$DATA" && MOUNTED=true && break
 done
 
-# 4. Check/create .env
-echo "[4] Checking .env..."
-if mountpoint -q "$DATA" 2>/dev/null && [[ -f "$DATA/env/.env" ]]; then
+if $MOUNTED && [[ -f "$DATA/env/.env" ]]; then
     cp "$DATA/env/.env" "$TC/.env"
-    echo "  Copied from Apricorn"
-elif [[ -f "$TC/.env" ]]; then
-    echo "  Using existing .env"
+    # Ensure SOVEREIGN_MODE is set
+    grep -q "SOVEREIGN_MODE" "$TC/.env" || echo "SOVEREIGN_MODE=true" >> "$TC/.env"
+    echo "  ✓ Secrets loaded from Apricorn"
+elif [[ -f "$TC/.env" ]] && grep -q "POSTGRES_PASSWORD" "$TC/.env"; then
+    grep -q "SOVEREIGN_MODE" "$TC/.env" || echo "SOVEREIGN_MODE=true" >> "$TC/.env"
+    echo "  ✓ Using existing .env"
 else
-    echo "  Generating new .env..."
+    echo "  Generating new secrets..."
     PG_PASS=$(openssl rand -hex 32)
     FERNET=$(openssl rand -base64 32)
     BOT_API_KEY=$(openssl rand -base64 32 | tr -d '/+=' | head -c 43)
@@ -91,75 +122,95 @@ ENVIRONMENT=production
 DEBUG=false
 SOVEREIGN_MODE=true
 ENVEOF
-    echo "  Generated (login: admin / $OPERATOR_PASS)"
+    # Save to Apricorn too if mounted
+    if $MOUNTED; then
+        mkdir -p "$DATA/env"
+        cp "$TC/.env" "$DATA/env/.env"
+    fi
+    echo "  ✓ Secrets generated (login: admin / $OPERATOR_PASS)"
 fi
 
-# Verify .env has what we need
-echo "  Checking .env contents..."
-for var in POSTGRES_PASSWORD POSTGRES_USER POSTGRES_DB REDIS_URL; do
-    if ! grep -q "^${var}=" "$TC/.env"; then
-        echo "  ERROR: Missing $var in .env"
-        exit 1
-    fi
-done
-echo "  ✓ .env valid"
-
-# 5. Docker
+# ============================================================
+# 5. START DOCKER
+# ============================================================
+echo ""
 echo "[5] Starting Docker..."
 systemctl is-active --quiet docker || { systemctl start docker; sleep 3; }
 
-# 6. Build with sovereign mode
-echo "[6] Building images (with sovereign mode)..."
+# ============================================================
+# 6. BUILD ALL IMAGES FROM SCRATCH
+# ============================================================
+echo ""
+echo "[6] Building ALL images from scratch (no cache)..."
 cd "$TC"
-OVERLAY="$REAL_HOME/.config/sovereign/compose/docker-compose.sovereign.yml"
-# Install overlay if not present
-mkdir -p "$REAL_HOME/.config/sovereign/compose"
-if [[ -d "$REAL_HOME/sovereign-boot/compose" ]]; then
-    cp "$REAL_HOME/sovereign-boot/compose/"* "$REAL_HOME/.config/sovereign/compose/"
-    chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config/sovereign"
-fi
 
 COMPOSE_FILES="-f $TC/docker-compose.yml"
 if [[ -f "$OVERLAY" ]]; then
     COMPOSE_FILES="$COMPOSE_FILES -f $OVERLAY"
-    echo "  Using sovereign overlay (Tor + auth bypass)"
 fi
 
-docker compose $COMPOSE_FILES build 2>&1 | tail -5
+docker compose $COMPOSE_FILES build --no-cache 2>&1 | tail -20
 
-# 7. Launch
-echo "[7] Launching..."
+# Pull infra images fresh
+echo "  Pulling infrastructure images..."
+docker pull postgres:16-alpine 2>/dev/null || true
+docker pull redis:7-alpine 2>/dev/null || true
+docker pull caddy:2-alpine 2>/dev/null || true
+docker pull osminogin/tor-simple:latest 2>/dev/null || true
+
+# ============================================================
+# 7. LAUNCH
+# ============================================================
 echo ""
+echo "[7] Launching..."
 cd "$TC"
 docker compose $COMPOSE_FILES --project-name sovereign up -d 2>&1
 
 echo ""
-echo "  Waiting 30 seconds for services to start..."
-sleep 30
+echo "  Waiting 40 seconds for all services to initialize..."
+sleep 40
 
+# ============================================================
+# 8. STATUS REPORT
+# ============================================================
 echo ""
-echo "=== CONTAINER STATUS ==="
+echo "╔═══════════════════════════════════════════════════════╗"
+echo "║                   STATUS REPORT                       ║"
+echo "╚═══════════════════════════════════════════════════════╝"
+echo ""
+
+echo "=== CONTAINERS ==="
 docker compose --project-name sovereign ps 2>/dev/null || docker ps -a
 echo ""
 
-echo "=== POSTGRES LOGS ==="
-docker logs sovereign-postgres 2>&1 | tail -10
+echo "=== POSTGRES ==="
+docker logs sovereign-postgres 2>&1 | tail -5
 echo ""
 
-echo "=== REDIS LOGS ==="
-docker logs sovereign-redis 2>&1 | tail -5
+echo "=== API ==="
+docker logs sovereign-api 2>&1 | tail -5
 echo ""
 
-echo "=== API LOGS ==="
-docker logs sovereign-api 2>&1 | tail -10
+echo "=== REDIS ==="
+docker logs sovereign-redis 2>&1 | tail -3
 echo ""
 
-# Check if dashboard is reachable
-if curl -s -o /dev/null -w "%{http_code}" http://localhost 2>/dev/null | grep -q "200\|301\|302"; then
-    echo "=== DASHBOARD IS UP ==="
-    echo "Open: http://localhost"
+# Test connectivity
+echo "=== CONNECTIVITY ==="
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost 2>/dev/null || echo "000")
+echo "  Dashboard (http://localhost): HTTP $HTTP_CODE"
+
+API_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/api/v1/health 2>/dev/null || echo "000")
+echo "  API health (http://localhost/api/v1/health): HTTP $API_CODE"
+
+echo ""
+if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "301" || "$HTTP_CODE" == "302" ]]; then
+    echo "╔═══════════════════════════════════════════════════════╗"
+    echo "║          SOVEREIGN SESSION ACTIVE                    ║"
+    echo "║          Open: http://localhost                       ║"
+    echo "╚═══════════════════════════════════════════════════════╝"
+    su - "$REAL_USER" -c "firefox http://localhost &" 2>/dev/null || true
 else
-    echo "=== DASHBOARD NOT REACHABLE YET ==="
-    echo "Check: sudo docker logs sovereign-caddy"
+    echo "Dashboard not responding yet. Check logs above for errors."
 fi
 echo ""

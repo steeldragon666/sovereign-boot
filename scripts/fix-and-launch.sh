@@ -72,11 +72,30 @@ fi
 echo "[4] Starting Docker..."
 systemctl is-active --quiet docker || { systemctl start docker; sleep 3; }
 
-# 5. Build and launch — BASE COMPOSE ONLY, no overlay
-echo "[5] Building and launching..."
+# 5. Build
+echo "[5] Building images..."
 cd "$TC"
 docker compose build --no-cache dashboard 2>&1 | tail -10
 docker compose build api bot 2>&1 | tail -10
+
+# 6. Start postgres first and wipe schema
+echo "[6] Starting Postgres and wiping database..."
+cd "$TC"
+docker compose up -d postgres
+echo "  Waiting for Postgres..."
+for i in $(seq 1 30); do
+    docker exec sovereign-postgres pg_isready -U "${POSTGRES_USER:-sovereign}" 2>/dev/null && break
+    sleep 2
+done
+# Source .env for credentials
+PG_USER=$(grep "^POSTGRES_USER=" "$TC/.env" | cut -d= -f2)
+PG_DB=$(grep "^POSTGRES_DB=" "$TC/.env" | cut -d= -f2)
+docker exec sovereign-postgres psql -U "$PG_USER" -d "$PG_DB" -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;" 2>&1
+echo "  ✓ Database schema reset"
+
+# 7. Launch everything
+echo "[7] Launching all services..."
+cd "$TC"
 docker compose up -d 2>&1
 
 echo ""

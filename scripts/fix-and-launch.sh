@@ -4,88 +4,28 @@ if [[ $EUID -ne 0 ]]; then echo "Run with: sudo bash $0"; exit 1; fi
 REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || whoami)}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 TC="$REAL_HOME/threadcount"
-DATA="/mnt/sovereign/data"
-OVERLAY="$REAL_HOME/.config/sovereign/compose/docker-compose.sovereign.yml"
 
 echo ""
-echo "╔═══════════════════════════════════════════════════════╗"
-echo "║         SOVEREIGN FULL RESET AND LAUNCH               ║"
-echo "╚═══════════════════════════════════════════════════════╝"
+echo "=== CLEAN START ==="
 echo ""
 
-# ============================================================
-# 1. DESTROY ALL DOCKER STATE
-# ============================================================
-echo "[1] Destroying all Docker state..."
-docker compose --project-name sovereign down -v --remove-orphans --timeout 5 2>/dev/null || true
+# 1. Kill everything
+echo "[1] Stopping Docker..."
 docker stop $(docker ps -aq) 2>/dev/null || true
 docker rm -f $(docker ps -aq) 2>/dev/null || true
 docker volume rm $(docker volume ls -q) 2>/dev/null || true
-docker network prune -f 2>/dev/null || true
-docker system prune -a --volumes -f 2>/dev/null || true
-echo "  ✓ All Docker containers, images, volumes, cache destroyed"
 
-# ============================================================
-# 2. UPDATE SOURCE CODE
-# ============================================================
-echo ""
-echo "[2] Updating source code..."
-su - "$REAL_USER" -c "cd $REAL_HOME/sovereign-boot && git pull" 2>/dev/null
+# 2. Update code
+echo "[2] Updating code..."
 if [[ -d "$TC" ]]; then
     su - "$REAL_USER" -c "cd $TC && git pull"
 else
     su - "$REAL_USER" -c "git clone https://github.com/steeldragon666/threadcount.git $TC"
 fi
-echo "  ✓ Code updated"
 
-# ============================================================
-# 3. INSTALL SOVEREIGN OVERLAY
-# ============================================================
-echo ""
-echo "[3] Installing sovereign overlay..."
-mkdir -p "$REAL_HOME/.config/sovereign/compose"
-cp "$REAL_HOME/sovereign-boot/compose/"* "$REAL_HOME/.config/sovereign/compose/" 2>/dev/null || true
-sed -i 's/\r$//' "$REAL_HOME/.config/sovereign/compose/"* 2>/dev/null || true
-chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config/sovereign"
-if [[ -f "$OVERLAY" ]]; then
-    echo "  ✓ Overlay installed"
-else
-    echo "  ⚠ No overlay found — will use base compose only"
-fi
-
-# ============================================================
-# 4. MOUNT APRICORN AND SETUP .ENV
-# ============================================================
-echo ""
-echo "[4] Setting up secrets..."
-umount -l "$DATA" 2>/dev/null || true
-MOUNTED=false
-for dev in /dev/sd?1 /dev/sd?; do
-    [[ -b "$dev" ]] || continue
-    FSTYPE=$(lsblk -no FSTYPE "$dev" 2>/dev/null | head -1)
-    [[ "$FSTYPE" == "exfat" || "$FSTYPE" == "vfat" ]] || continue
-    SIZE=$(lsblk -bno SIZE "$dev" 2>/dev/null | head -1)
-    SIZE_GB=$((SIZE / 1073741824))
-    [[ $SIZE_GB -lt 5 ]] && continue
-    PARENT=$(lsblk -no PKNAME "$dev" 2>/dev/null | head -1)
-    [[ "$PARENT" == nvme* ]] && continue
-    umount "$dev" 2>/dev/null || true
-    AUTOMOUNT=$(lsblk -no MOUNTPOINT "$dev" 2>/dev/null | head -1)
-    [[ -n "$AUTOMOUNT" ]] && umount "$AUTOMOUNT" 2>/dev/null || true
-    mkdir -p "$DATA"
-    mount -o "rw,uid=$(id -u $REAL_USER),gid=$(id -g $REAL_USER)" "$dev" "$DATA" && MOUNTED=true && break
-done
-
-if $MOUNTED && [[ -f "$DATA/env/.env" ]]; then
-    cp "$DATA/env/.env" "$TC/.env"
-    # Ensure SOVEREIGN_MODE is set
-    grep -q "SOVEREIGN_MODE" "$TC/.env" || echo "SOVEREIGN_MODE=true" >> "$TC/.env"
-    echo "  ✓ Secrets loaded from Apricorn"
-elif [[ -f "$TC/.env" ]] && grep -q "POSTGRES_PASSWORD" "$TC/.env"; then
-    grep -q "SOVEREIGN_MODE" "$TC/.env" || echo "SOVEREIGN_MODE=true" >> "$TC/.env"
-    echo "  ✓ Using existing .env"
-else
-    echo "  Generating new secrets..."
+# 3. Setup .env
+echo "[3] Setting up .env..."
+if [[ ! -f "$TC/.env" ]] || ! grep -q "POSTGRES_PASSWORD" "$TC/.env"; then
     PG_PASS=$(openssl rand -hex 32)
     FERNET=$(openssl rand -base64 32)
     BOT_API_KEY=$(openssl rand -base64 32 | tr -d '/+=' | head -c 43)
@@ -120,128 +60,42 @@ BACKUP_RETENTION_DAYS=30
 LOG_LEVEL=INFO
 ENVIRONMENT=production
 DEBUG=false
-SOVEREIGN_MODE=true
 ENVEOF
-    # Save to Apricorn too if mounted
-    if $MOUNTED; then
-        mkdir -p "$DATA/env"
-        cp "$TC/.env" "$DATA/env/.env"
-    fi
-    echo "  ✓ Secrets generated (login: admin / $OPERATOR_PASS)"
+    echo "  Generated (operator: admin / $OPERATOR_PASS)"
+else
+    echo "  Using existing .env"
 fi
 
-# ============================================================
-# 5. START DOCKER
-# ============================================================
-echo ""
-echo "[5] Starting Docker..."
+# 4. Docker
+echo "[4] Starting Docker..."
 systemctl is-active --quiet docker || { systemctl start docker; sleep 3; }
 
-# ============================================================
-# 6. BUILD ALL IMAGES FROM SCRATCH
-# ============================================================
-echo ""
-echo "[6] Building ALL images from scratch (no cache)..."
+# 5. Build and launch — BASE COMPOSE ONLY, no overlay
+echo "[5] Building and launching..."
 cd "$TC"
-
-# Write .env.production so Vite bakes SOVEREIGN_MODE into the dashboard JS bundle
-echo "VITE_SOVEREIGN_MODE=true" > "$TC/dashboard/.env.production"
-
-COMPOSE_FILES="-f $TC/docker-compose.yml"
-if [[ -f "$OVERLAY" ]]; then
-    COMPOSE_FILES="$COMPOSE_FILES -f $OVERLAY"
-fi
-
-docker compose $COMPOSE_FILES build --no-cache 2>&1 | tail -20
-
-# Pull infra images fresh
-echo "  Pulling infrastructure images..."
-docker pull postgres:16-alpine 2>/dev/null || true
-docker pull redis:7-alpine 2>/dev/null || true
-docker pull caddy:2-alpine 2>/dev/null || true
-docker pull osminogin/tor-simple:latest 2>/dev/null || true
-
-# ============================================================
-# 7. START POSTGRES FIRST AND RESET DATABASE
-# ============================================================
-echo ""
-echo "[7] Starting Postgres and resetting database..."
-cd "$TC"
-
-# Source .env for DB credentials
-set -a
-source "$TC/.env"
-set +a
-
-# Start only postgres
-docker compose $COMPOSE_FILES --project-name sovereign up -d postgres
-
-# Wait for postgres to be healthy
-echo "  Waiting for Postgres to be ready..."
-for i in $(seq 1 30); do
-    if docker exec sovereign-postgres pg_isready -U "${POSTGRES_USER:-sovereign}" 2>/dev/null; then
-        break
-    fi
-    sleep 2
-done
-
-# Drop and recreate the database schema — guarantees clean state
-echo "  Resetting database schema..."
-docker exec sovereign-postgres psql -U "${POSTGRES_USER:-sovereign}" -d "${POSTGRES_DB:-sovereign_commerce}" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>/dev/null || true
-echo "  ✓ Database schema reset"
-
-# ============================================================
-# 8. LAUNCH ALL SERVICES
-# ============================================================
-echo ""
-echo "[8] Launching all services..."
-docker compose $COMPOSE_FILES --project-name sovereign up -d 2>&1
+docker compose build 2>&1 | tail -10
+docker compose up -d 2>&1
 
 echo ""
-echo "  Waiting 40 seconds for all services to initialize..."
-sleep 40
+echo "  Waiting 60 seconds for services..."
+sleep 60
 
-# ============================================================
-# 8. STATUS REPORT
-# ============================================================
 echo ""
-echo "╔═══════════════════════════════════════════════════════╗"
-echo "║                   STATUS REPORT                       ║"
-echo "╚═══════════════════════════════════════════════════════╝"
+echo "=== STATUS ==="
+docker compose ps
 echo ""
-
-echo "=== CONTAINERS ==="
-docker compose --project-name sovereign ps 2>/dev/null || docker ps -a
-echo ""
-
 echo "=== POSTGRES ==="
 docker logs sovereign-postgres 2>&1 | tail -5
 echo ""
-
 echo "=== API ==="
-docker logs sovereign-api 2>&1 | tail -5
+docker logs sovereign-api 2>&1 | tail -10
 echo ""
-
 echo "=== REDIS ==="
 docker logs sovereign-redis 2>&1 | tail -3
 echo ""
 
-# Test connectivity
-echo "=== CONNECTIVITY ==="
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost 2>/dev/null || echo "000")
-echo "  Dashboard (http://localhost): HTTP $HTTP_CODE"
-
-API_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/api/v1/health 2>/dev/null || echo "000")
-echo "  API health (http://localhost/api/v1/health): HTTP $API_CODE"
-
-echo ""
-if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "301" || "$HTTP_CODE" == "302" ]]; then
-    echo "╔═══════════════════════════════════════════════════════╗"
-    echo "║          SOVEREIGN SESSION ACTIVE                    ║"
-    echo "║          Open: http://localhost                       ║"
-    echo "╚═══════════════════════════════════════════════════════╝"
-    su - "$REAL_USER" -c "firefox http://localhost &" 2>/dev/null || true
-else
-    echo "Dashboard not responding yet. Check logs above for errors."
-fi
+HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost 2>/dev/null || echo "000")
+echo "Dashboard: HTTP $HTTP"
+API=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/api/v1/health 2>/dev/null || echo "000")
+echo "API health: HTTP $API"
 echo ""

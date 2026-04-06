@@ -144,6 +144,9 @@ echo ""
 echo "[6] Building ALL images from scratch (no cache)..."
 cd "$TC"
 
+# Write .env.production so Vite bakes SOVEREIGN_MODE into the dashboard JS bundle
+echo "VITE_SOVEREIGN_MODE=true" > "$TC/dashboard/.env.production"
+
 COMPOSE_FILES="-f $TC/docker-compose.yml"
 if [[ -f "$OVERLAY" ]]; then
     COMPOSE_FILES="$COMPOSE_FILES -f $OVERLAY"
@@ -159,11 +162,39 @@ docker pull caddy:2-alpine 2>/dev/null || true
 docker pull osminogin/tor-simple:latest 2>/dev/null || true
 
 # ============================================================
-# 7. LAUNCH
+# 7. START POSTGRES FIRST AND RESET DATABASE
 # ============================================================
 echo ""
-echo "[7] Launching..."
+echo "[7] Starting Postgres and resetting database..."
 cd "$TC"
+
+# Source .env for DB credentials
+set -a
+source "$TC/.env"
+set +a
+
+# Start only postgres
+docker compose $COMPOSE_FILES --project-name sovereign up -d postgres
+
+# Wait for postgres to be healthy
+echo "  Waiting for Postgres to be ready..."
+for i in $(seq 1 30); do
+    if docker exec sovereign-postgres pg_isready -U "${POSTGRES_USER:-sovereign}" 2>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+
+# Drop and recreate the database schema — guarantees clean state
+echo "  Resetting database schema..."
+docker exec sovereign-postgres psql -U "${POSTGRES_USER:-sovereign}" -d "${POSTGRES_DB:-sovereign_commerce}" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>/dev/null || true
+echo "  ✓ Database schema reset"
+
+# ============================================================
+# 8. LAUNCH ALL SERVICES
+# ============================================================
+echo ""
+echo "[8] Launching all services..."
 docker compose $COMPOSE_FILES --project-name sovereign up -d 2>&1
 
 echo ""

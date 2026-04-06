@@ -60,9 +60,11 @@ BACKUP_RETENTION_DAYS=30
 LOG_LEVEL=INFO
 ENVIRONMENT=production
 DEBUG=false
+SOVEREIGN_MODE=true
 ENVEOF
     echo "  Generated (operator: admin / $OPERATOR_PASS)"
 else
+    grep -q "SOVEREIGN_MODE" "$TC/.env" || echo "SOVEREIGN_MODE=true" >> "$TC/.env"
     echo "  Using existing .env"
 fi
 
@@ -73,7 +75,8 @@ systemctl is-active --quiet docker || { systemctl start docker; sleep 3; }
 # 5. Build and launch — BASE COMPOSE ONLY, no overlay
 echo "[5] Building and launching..."
 cd "$TC"
-docker compose build 2>&1 | tail -10
+docker compose build --no-cache dashboard 2>&1 | tail -10
+docker compose build api bot 2>&1 | tail -10
 docker compose up -d 2>&1
 
 echo ""

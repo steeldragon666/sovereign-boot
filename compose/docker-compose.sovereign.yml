@@ -1,17 +1,9 @@
-# Sovereign overlay
-#
-# Adds:
-#   - Tor SOCKS5 proxy for outbound api/bot traffic
-#   - env_file from Apricorn mount for postgres/api/bot
-#
-# Does NOT redirect Docker volumes — they stay on the laptop's
-# LUKS-encrypted SSD (fast, supports POSIX permissions).
-# The Apricorn holds secrets only (.env, JWT keys).
+# Sovereign overlay — Tor proxy for outbound traffic
 
 services:
   tor-proxy:
     build:
-      context: ${SOVEREIGN_BOOT_DIR:-./tor}
+      context: ./tor-proxy
       dockerfile: Dockerfile
     container_name: sovereign-tor
     restart: unless-stopped

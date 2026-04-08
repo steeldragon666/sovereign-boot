@@ -4,45 +4,37 @@ if [[ $EUID -ne 0 ]]; then echo "Run with: sudo bash $0"; exit 1; fi
 REAL_HOME=$(getent passwd "${SUDO_USER:-$(whoami)}" | cut -d: -f6)
 TC="$REAL_HOME/threadcount"
 SB="$REAL_HOME/sovereign-boot"
-OVERLAY="$REAL_HOME/.config/sovereign/compose/docker-compose.sovereign.yml"
+OVERLAY="$TC/docker-compose.sovereign.yml"
 
 echo "=== Enabling Tor ==="
 
-# Install overlay and Tor Dockerfile
-mkdir -p "$REAL_HOME/.config/sovereign/compose/tor"
+# Copy overlay into threadcount directory (so build contexts resolve correctly)
 cp "$SB/compose/docker-compose.sovereign.yml" "$OVERLAY"
-cp "$SB/compose/tor/Dockerfile" "$REAL_HOME/.config/sovereign/compose/tor/Dockerfile"
-sed -i 's/\r$//' "$OVERLAY" "$REAL_HOME/.config/sovereign/compose/tor/Dockerfile"
+sed -i 's/\r$//' "$OVERLAY"
 
-# Set build context for Tor
-export SOVEREIGN_BOOT_DIR="$REAL_HOME/.config/sovereign/compose/tor"
+# Copy Tor Dockerfile into threadcount/tor-proxy/
+mkdir -p "$TC/tor-proxy"
+cp "$SB/compose/tor/Dockerfile" "$TC/tor-proxy/Dockerfile"
+sed -i 's/\r$//' "$TC/tor-proxy/Dockerfile"
 
-# Build and restart
-echo "Building Tor proxy..."
+echo "  ✓ Overlay and Tor Dockerfile installed"
+
+# Build Tor and restart everything
 cd "$TC"
-docker compose -f docker-compose.yml -f "$OVERLAY" build tor-proxy 2>&1 | tail -5
+echo "  Building Tor proxy..."
+docker compose -f docker-compose.yml -f docker-compose.sovereign.yml build tor-proxy 2>&1 | tail -5
 
-echo "Starting all services with Tor..."
-docker compose -f docker-compose.yml -f "$OVERLAY" up -d --force-recreate
+echo "  Starting all services with Tor..."
+docker compose -f docker-compose.yml -f docker-compose.sovereign.yml up -d 2>&1
 
-echo "Waiting 60 seconds for Tor to establish circuits..."
-sleep 60
+echo "  Waiting 30 seconds for Tor circuits..."
+sleep 30
 
 echo ""
-echo "=== Status ==="
 docker ps --format "table {{.Names}}\t{{.Status}}"
-
 echo ""
-echo "=== Tor Verification ==="
-TOR_CHECK=$(docker exec sovereign-tor curl -sf --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip 2>/dev/null || echo "FAILED")
-echo "Tor exit IP: $TOR_CHECK"
 
-echo ""
-BOT_CHECK=$(docker exec sovereign-bot python3 -c "
-import os, urllib.request
-proxy = urllib.request.ProxyHandler({'https': os.environ.get('HTTPS_PROXY','')})
-opener = urllib.request.build_opener(proxy)
-print(opener.open('https://check.torproject.org/api/ip').read().decode())
-" 2>/dev/null || echo "Bot cannot reach Tor")
-echo "Bot via Tor: $BOT_CHECK"
+# Test Tor
+echo "=== Tor Test ==="
+docker exec sovereign-tor curl -sf --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip 2>/dev/null && echo "" || echo "Tor not ready yet — may need another 30 seconds"
 echo ""

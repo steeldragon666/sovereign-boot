@@ -10,11 +10,11 @@
 
 services:
   tor-proxy:
-    image: dperson/torproxy:latest
+    build:
+      context: ${SOVEREIGN_BOOT_DIR:-./tor}
+      dockerfile: Dockerfile
     container_name: sovereign-tor
     restart: unless-stopped
-    environment:
-      TOR_NewCircuitPeriod: "30"
     networks:
       - sovereign-net
     deploy:
@@ -22,12 +22,6 @@ services:
         limits:
           memory: 128M
           cpus: "0.25"
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "--socks5-hostname", "localhost:9050", "https://check.torproject.org/api/ip"]
-      interval: 30s
-      timeout: 15s
-      retries: 5
-      start_period: 60s
 
   postgres:
     environment:

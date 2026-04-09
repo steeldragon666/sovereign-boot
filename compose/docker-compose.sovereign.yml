@@ -1,9 +1,10 @@
 # Sovereign overlay — Tor proxy for bot Telegram traffic
+# Usage: docker compose -f docker-compose.yml -f docker-compose.sovereign.yml up -d
 
 services:
   tor-proxy:
     build:
-      context: ./tor-proxy
+      context: ./tor
       dockerfile: Dockerfile
     container_name: sovereign-tor
     restart: unless-stopped
@@ -14,10 +15,6 @@ services:
         limits:
           memory: 128M
           cpus: "0.25"
-
-  postgres:
-    environment:
-      SOVEREIGN_MODE: "true"
 
   api:
     environment:
@@ -30,10 +27,3 @@ services:
     depends_on:
       tor-proxy:
         condition: service_started
-
-  dashboard:
-    build:
-      context: ./dashboard
-      dockerfile: Dockerfile
-      args:
-        VITE_SOVEREIGN_MODE: "true"

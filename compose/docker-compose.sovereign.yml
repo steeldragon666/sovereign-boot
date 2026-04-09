@@ -32,9 +32,7 @@ services:
   bot:
     environment:
       SOVEREIGN_MODE: "true"
-      HTTPS_PROXY: socks5h://tor-proxy:9050
-      HTTP_PROXY: socks5h://tor-proxy:9050
-      NO_PROXY: postgres,redis,localhost,127.0.0.1,api,bot,dashboard,caddy
+      TOR_PROXY_URL: socks5h://tor-proxy:9050
     depends_on:
       tor-proxy:
         condition: service_started

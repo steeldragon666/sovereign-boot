@@ -1,4 +1,4 @@
-# Sovereign overlay — Tor proxy for outbound traffic
+# Sovereign overlay — Tor proxy for bot Telegram traffic
 
 services:
   tor-proxy:
@@ -22,12 +22,6 @@ services:
   api:
     environment:
       SOVEREIGN_MODE: "true"
-      HTTPS_PROXY: socks5h://tor-proxy:9050
-      HTTP_PROXY: socks5h://tor-proxy:9050
-      NO_PROXY: postgres,redis,localhost,127.0.0.1,api,bot,dashboard,caddy
-    depends_on:
-      tor-proxy:
-        condition: service_started
 
   bot:
     environment:
